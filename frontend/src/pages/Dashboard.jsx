@@ -1,69 +1,122 @@
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext, useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { io } from 'socket.io-client';
 import { MockContext } from '../context/MockContext';
-import { Calendar, User, BookOpen, Clock, CheckCircle2, Lock, AlertTriangle, Eye } from 'lucide-react';
+import { API_BASE } from '../config';
+import { useToast } from '../context/ToastContext';
+import DateTimeBanner from '../components/DateTimeBanner';
+import StatusBadge from '../components/StatusBadge';
+import { 
+  Calendar, BookOpen, Clock, Lock, Eye, Award, CheckSquare, 
+  GraduationCap, ClipboardCheck, Play, Edit3, AlertTriangle, Bell
+} from 'lucide-react';
 
 const Dashboard = ({ user }) => {
   const { mockDate, mockTime } = useContext(MockContext);
+  const toast = useToast();
   const [dayInfo, setDayInfo] = useState(null);
   const [schedule, setSchedule] = useState([]);
   const [periodStatuses, setPeriodStatuses] = useState({});
   const [loading, setLoading] = useState(true);
+  const isInitialLoadRef = useRef(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  // Fetch today's day number & holiday status
+  // ERP Dashboard alerts feed
+  const [alerts, setAlerts] = useState([
+    { id: 1, type: 'warning', msg: '2 students in DBMS fell below 75% attendance criteria.' },
+    { id: 2, type: 'info', msg: 'Period 3 attendance logged successfully.' }
+  ]);
+
+  // Reset initial load status when date changes
   useEffect(() => {
-    const fetchDayData = async () => {
-      setLoading(true);
+    isInitialLoadRef.current = true;
+  }, [mockDate]);
+
+  // Fetch today's day number & holiday status
+  const fetchDayData = async () => {
+    try {
+      if (isInitialLoadRef.current) {
+        setLoading(true);
+      }
       setError('');
-      try {
-        const response = await fetch(`http://localhost:5000/api/schedule/today?date=${mockDate}`, {
-          headers: {
-            'Authorization': `Bearer ${user.token}`
-          }
-        });
-        if (!response.ok) throw new Error('Failed to fetch schedule day info.');
-        const dayData = await response.json();
-        setDayInfo(dayData);
+      
+      const response = await fetch(`${API_BASE}/api/schedule/today?date=${mockDate}`, {
+        headers: { 'Authorization': `Bearer ${user.token}` }
+      });
+      if (!response.ok) throw new Error('Failed to fetch schedule day info.');
+      const dayData = await response.json();
+      
+      setDayInfo(dayData);
 
-        if (dayData.isHoliday || !dayData.dayNumber) {
-          setSchedule([]);
-          setLoading(false);
-          return;
-        }
+      if (dayData.isHoliday || !dayData.dayNumber) {
+        setSchedule([]);
+        setLoading(false);
+        return;
+      }
 
-        // Fetch timetable for that day number
-        const timetableRes = await fetch(`http://localhost:5000/api/timetable/my-schedule/${dayData.dayNumber}`, {
-          headers: {
-            'Authorization': `Bearer ${user.token}`
-          }
-        });
-        if (!timetableRes.ok) throw new Error('Failed to fetch timetable.');
-        const timetableData = await timetableRes.json();
-        setSchedule(timetableData.schedule);
+      // Fetch timetable for that day number
+      const timetableRes = await fetch(`${API_BASE}/api/timetable/my-schedule/${dayData.dayNumber}`, {
+        headers: { 'Authorization': `Bearer ${user.token}` }
+      });
+      if (!timetableRes.ok) throw new Error('Failed to fetch timetable.');
+      const timetableData = await timetableRes.json();
+      
+      setSchedule(timetableData.schedule);
 
-        // Fetch status (marked/unmarked) for all 7 periods
-        const statusMap = {};
-        for (let period of timetableData.schedule) {
-          const statusRes = await fetch(`http://localhost:5000/api/attendance/status?date=${mockDate}&period=${period.period}&timetableDay=${dayData.dayNumber}&mockTime=${mockTime}`, {
-            headers: {
-              'Authorization': `Bearer ${user.token}`
-            }
+      // Parallel status checks
+      const statusPromises = timetableData.schedule.map(async (period) => {
+        try {
+          const statusRes = await fetch(`${API_BASE}/api/attendance/status?date=${mockDate}&period=${period.period}&timetableDay=${dayData.dayNumber}&mockTime=${mockTime}`, {
+            headers: { 'Authorization': `Bearer ${user.token}` }
           });
           if (statusRes.ok) {
-            statusMap[period.period] = await statusRes.json();
+            const info = await statusRes.json();
+            return { period: period.period, info };
           }
+        } catch (err) {
+          console.error(`Status check failed for period ${period.period}`, err);
         }
-        setPeriodStatuses(statusMap);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
+        return { period: period.period, info: { marked: false, markingOpen: false } };
+      });
 
+      const statusResults = await Promise.all(statusPromises);
+      const statusMap = {};
+      statusResults.forEach(res => {
+        statusMap[res.period] = res.info;
+      });
+      setPeriodStatuses(statusMap);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+      isInitialLoadRef.current = false;
+    }
+  };
+
+  // Socket IO for live sync
+  useEffect(() => {
     fetchDayData();
+
+    const socket = io(API_BASE);
+    socket.emit('join_room', 'attendance_updates');
+
+    socket.on('attendance_updated', (data) => {
+      if (data.date === mockDate) {
+        toast.info(`Real-time update: Hour ${data.period} attendance submitted!`);
+        fetchDayData();
+        
+        // Push alert to feed
+        setAlerts(prev => [
+          { id: Date.now(), type: 'info', msg: `Hour ${data.period} attendance logged for ${data.subject || ''}` },
+          ...prev
+        ]);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
   }, [mockDate, mockTime, user]);
 
   const handleMarkClick = (periodNumber, subjectAcronym) => {
@@ -76,216 +129,242 @@ const Dashboard = ({ user }) => {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '80vh' }}>
-        <div style={{ color: 'var(--text-secondary)' }}>Loading Academic Dashboard...</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '80vh', backgroundColor: 'var(--clr-gray-100)' }}>
+        <div style={{ color: 'var(--clr-primary-700)', fontWeight: '600', display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <span className="animate-pulse">Loading ERP Faculty Dashboard...</span>
+        </div>
       </div>
     );
   }
 
+  // Stats calculation
+  const totalClasses = schedule.filter(s => s.subjectAcronym !== 'FREE').length;
+  const myClasses = schedule.filter(s => s.subjectAcronym !== 'FREE' && (user.role === 'admin' || s.teacherId === user.teacherId));
+  
+  let activeCount = 0;
+  let markedCount = 0;
+  Object.keys(periodStatuses).forEach(pKey => {
+    const stat = periodStatuses[pKey];
+    if (stat?.markingOpen) activeCount++;
+    if (stat?.marked) markedCount++;
+  });
+
   return (
-    <div className="container" style={{ padding: '32px 24px', animation: 'fadeIn 0.3s ease' }}>
-      
-      {error && (
-        <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: 'var(--color-danger)', padding: '16px', borderRadius: '12px', marginBottom: '24px' }}>
-          {error}
-        </div>
-      )}
+    <div style={{ padding: '1.5rem', minWidth: 0 }}>
+      <div className="container animate-fade">
+        <DateTimeBanner />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '32px' }}>
-        
-        {/* Left Column: Teacher Info Card */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          <div className="glass-panel" style={{ padding: '24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-              <div style={{ width: '48px', height: '48px', borderRadius: '12px', background: 'rgba(99, 102, 241, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-primary)' }}>
-                <User size={24} />
-              </div>
-              <div>
-                <h3 style={{ fontSize: '16px', color: 'var(--text-primary)' }}>{user.name}</h3>
-                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>ID: {user.teacherId}</span>
-              </div>
+        {error && <div className="alert alert-danger mb-4">{error}</div>}
+
+        {/* Live ERP Stat Indicators */}
+        <div className="grid-4 mb-6">
+          <div className="stat-card" style={{ background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.4)', borderRadius: '16px' }}>
+            <div className="stat-icon green"><GraduationCap size={24} /></div>
+            <div>
+              <div className="stat-number">64</div>
+              <div className="stat-label">Roster Strength</div>
             </div>
+          </div>
+          <div className="stat-card" style={{ background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.4)', borderRadius: '16px' }}>
+            <div className="stat-icon blue"><BookOpen size={24} /></div>
+            <div>
+              <div className="stat-number">{totalClasses}</div>
+              <div className="stat-label">Total Slots Today</div>
+            </div>
+          </div>
+          <div className="stat-card" style={{ background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.4)', borderRadius: '16px' }}>
+            <div className="stat-icon amber"><Clock size={24} /></div>
+            <div>
+              <div className="stat-number">{activeCount}</div>
+              <div className="stat-label">Active Slots</div>
+            </div>
+          </div>
+          <div className="stat-card" style={{ background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.4)', borderRadius: '16px' }}>
+            <div className="stat-icon teal"><CheckSquare size={24} /></div>
+            <div>
+              <div className="stat-number">{markedCount}</div>
+              <div className="stat-label">Periods Logged</div>
+            </div>
+          </div>
+        </div>
 
-            <div style={{ borderTop: '1px solid var(--border-glass)', paddingTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div>
-                <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Department</span>
-                <span style={{ fontSize: '14px', color: 'var(--text-primary)', fontWeight: '500' }}>Information Technology</span>
+        {/* Dashboard Panels */}
+        <div className="dashboard-panels" style={{ display: 'grid', gridTemplateColumns: '280px 1fr 280px', gap: '24px' }}>
+          
+          {/* Faculty Bio Card */}
+          <div className="flex flex-col gap-4">
+            <div className="card" style={{ borderRadius: '16px' }}>
+              <div className="card-header">
+                <h3 className="text-sm font-bold">ERP Profile File</h3>
               </div>
-              <div>
-                <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Assigned Subjects</span>
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '4px' }}>
-                  {user.assignedSubjects.length > 0 ? (
-                    user.assignedSubjects.map((sub, i) => (
-                      <span key={i} className="badge badge-present" style={{ fontSize: '11px' }}>{sub}</span>
-                    ))
-                  ) : (
-                    <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>None (Admin user)</span>
-                  )}
+              <div className="card-body flex flex-col gap-3" style={{ fontSize: '13px' }}>
+                <div>
+                  <div className="text-xs text-muted uppercase font-semibold">User Role</div>
+                  <div className="font-bold text-primary mt-1" style={{ textTransform: 'capitalize' }}>{user.role}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted uppercase font-semibold">Instructor Name</div>
+                  <div className="font-bold mt-1">{user.name}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted uppercase font-semibold">Teacher ID</div>
+                  <div className="font-mono text-sm mt-1">{user.teacherId}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted uppercase font-semibold">Department</div>
+                  <div className="text-sm mt-1">{user.department || 'IT'}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted uppercase font-semibold mb-1">Subject Scope</div>
+                  <div className="flex gap-1 flex-wrap">
+                    {user.assignedSubjects?.map(sub => (
+                      <span key={sub} className="badge badge-present" style={{ fontSize: '10px' }}>{sub}</span>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Quick Info Box */}
-          <div className="glass-panel" style={{ padding: '20px', background: 'rgba(99, 102, 241, 0.05)', border: '1px solid rgba(99, 102, 241, 0.1)' }}>
-            <h4 style={{ fontSize: '13px', color: 'var(--color-primary)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Clock size={14} />
-              Academic Rule reminder
-            </h4>
-            <ul style={{ listStyleType: 'disc', paddingLeft: '16px', fontSize: '11px', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <li>Attendance can only be submitted during the active period window.</li>
-              <li>Teacher has a 15-minute grace period after class to make corrections.</li>
-              <li>Lockouts will trigger automatically after the grace period.</li>
-            </ul>
-          </div>
-        </div>
-
-        {/* Right Column: Timetable Schedule */}
-        <div>
-          {dayInfo?.isHoliday ? (
-            <div className="glass-panel flex-center animate-fade-in" style={{ flexDirection: 'column', padding: '60px 40px', gap: '20px', borderStyle: 'dashed' }}>
-              <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(99, 102, 241, 0.1)', display: 'flex', alignItems: 'center', justifySelf: 'center', justifyContent: 'center', color: '#818cf8' }}>
-                <Calendar size={32} />
-              </div>
-              <div style={{ textAlign: 'center' }}>
-                <h2 style={{ fontSize: '20px', marginBottom: '8px' }}>Holiday Schedule</h2>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '14px', maxWidth: '400px' }}>
-                  Today is marked as a holiday: <strong>{dayInfo.description}</strong>. Timetable schedule is inactive, and no attendance can be recorded.
-                </p>
+            <div className="alert alert-info" style={{ fontSize: '0.8rem', borderRadius: '12px' }}>
+              <div>
+                <strong>Lockout Rule:</strong> Log attendance during classes. Post-class corrections are permitted for exactly 15 minutes after slots complete.
               </div>
             </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={{ fontSize: '22px' }}>Today's Periods Timetable</h2>
-                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  Active Schedule: <strong style={{ color: 'var(--color-primary)' }}>{dayInfo?.description}</strong>
-                </span>
+          </div>
+
+          {/* Timetable Slots Panel */}
+          <div>
+            {dayInfo?.isHoliday ? (
+              <div className="empty-state card" style={{ borderRadius: '16px' }}>
+                <div className="empty-icon">📅</div>
+                <div className="empty-title">Holiday Declared</div>
+                <div className="empty-text">No active schedule for {dayInfo.description || 'today'}.</div>
               </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-lg">Sequence Day: {dayInfo?.description || 'Active'}</h3>
+                  <span className="text-xs text-muted">7-Slot Timetable Grid</span>
+                </div>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {schedule.map((slot) => {
-                  const statusInfo = periodStatuses[slot.period] || {};
-                  const isAssignedToMe = user.role === 'admin' || slot.teacherId === user.teacherId;
-                  const isFree = slot.subjectAcronym === 'FREE';
-                  
-                  // Marking open state based on API response
-                  const markingOpen = statusInfo.markingOpen;
-                  const isMarked = statusInfo.marked;
-                  const canEdit = statusInfo.isAllowedToEdit;
+                <div className="flex flex-col gap-3">
+                  {schedule.map((slot) => {
+                    const statusInfo = periodStatuses[slot.period] || {};
+                    const isAssignedToMe = user.role === 'admin' || user.role === 'superadmin' || slot.teacherId === user.teacherId;
+                    const isFree = slot.subjectAcronym === 'FREE' || !isAssignedToMe;
 
-                  let borderClass = '';
-                  let glowBadge = null;
+                    let cardClass = 'free';
+                    let statusLabel = 'Locked / Closed';
 
-                  if (markingOpen && isAssignedToMe && !isMarked) {
-                    borderClass = 'active-glow';
-                    glowBadge = (
-                      <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: 'var(--color-secondary)', border: '1px solid rgba(168, 85, 247, 0.4)', animation: 'pulse-glow 1.5s infinite' }}>
-                        ● Active Period
-                      </span>
-                    );
-                  }
+                    if (statusInfo.marked) {
+                      cardClass = 'marked';
+                      statusLabel = 'Logged';
+                    } else if (statusInfo.markingOpen && isAssignedToMe) {
+                      cardClass = 'active';
+                      statusLabel = 'Active Now';
+                    } else if (!statusInfo.marked && isAssignedToMe) {
+                      cardClass = 'upcoming';
+                      statusLabel = 'Upcoming';
+                    }
 
-                  return (
-                    <div 
-                      key={slot.period} 
-                      className={`glass-panel ${borderClass}`} 
-                      style={{ padding: '20px', display: 'grid', gridTemplateColumns: '120px 1fr auto', alignItems: 'center', gap: '20px' }}
-                    >
-                      {/* Period timing and number */}
-                      <div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>PERIOD {slot.period}</div>
-                        <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', marginTop: '2px' }}>{slot.startTime} - {slot.endTime}</div>
-                      </div>
+                    return (
+                      <div 
+                        key={slot.period} 
+                        className={`period-card ${cardClass}`}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '100px 1fr 180px',
+                          alignItems: 'center',
+                          gap: '1.5rem',
+                          borderRadius: '12px',
+                          boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)'
+                        }}
+                      >
+                        <div>
+                          <span className="period-number">Hour {slot.period}</span>
+                          <div className="period-time mt-1">{slot.startTime} - {slot.endTime}</div>
+                        </div>
 
-                      {/* Subject Acronym and Name */}
-                      <div>
-                        {isFree ? (
-                          <div style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '15px' }}>Free Period</div>
-                        ) : (
-                          <>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <span style={{ fontSize: '16px', fontWeight: '700', color: isAssignedToMe ? 'var(--color-primary)' : 'var(--text-secondary)' }}>
-                                {slot.subjectAcronym}
-                              </span>
-                              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Classroom: {slot.classroom}</span>
-                              {glowBadge}
-                              {!isAssignedToMe && (
-                                <span className="badge" style={{ background: 'rgba(255, 255, 255, 0.05)', color: 'var(--text-muted)', border: '1px solid var(--border-glass)', fontSize: '10px' }}>
-                                  Other Faculty
-                                </span>
-                              )}
-                            </div>
-                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>{slot.subjectName}</div>
-                          </>
-                        )}
-                      </div>
-
-                      {/* Action buttons or statuses */}
-                      <div>
-                        {isFree ? (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>-</span>
-                        ) : isMarked ? (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                            <div style={{ textAlign: 'right' }}>
-                              <span className="badge badge-present" style={{ gap: '4px' }}>
-                                <CheckCircle2 size={12} />
-                                Marked
-                              </span>
-                              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                P: {statusInfo.summary?.present} | A: {statusInfo.summary?.absent} | OD: {statusInfo.summary?.od}
+                        <div>
+                          {isFree ? (
+                            <span className="text-muted italic">Free Slot</span>
+                          ) : (
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-primary">{slot.subjectAcronym}</span>
+                                <span className="text-xs text-muted">({slot.classroom || 'LT-2'})</span>
                               </div>
+                              <div className="text-xs text-muted mt-1">{slot.subjectName}</div>
                             </div>
-                            
-                            {canEdit ? (
-                              <button 
-                                onClick={() => handleViewClick(slot.period)}
-                                className="btn-primary" 
-                                style={{ padding: '8px 16px', fontSize: '12px' }}
-                              >
-                                Edit
-                              </button>
-                            ) : (
-                              <button 
-                                onClick={() => handleViewClick(slot.period)}
-                                className="btn-secondary" 
-                                style={{ padding: '8px 16px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                              >
+                          )}
+                        </div>
+
+                        <div className="flex justify-end items-center gap-3">
+                          {isFree ? (
+                            <span className="text-muted">-</span>
+                          ) : statusInfo.marked ? (
+                            <>
+                              <div className="text-right">
+                                <span className="badge badge-present">Logged</span>
+                                <div className="text-xs text-muted mt-1">P:{statusInfo.summary?.present} A:{statusInfo.summary?.absent}</div>
+                              </div>
+                              <button className="btn btn-secondary btn-sm" onClick={() => handleViewClick(slot.period)}>
                                 <Eye size={12} />
-                                View
+                                <span>{statusInfo.isAllowedToEdit ? 'Edit' : 'View'}</span>
                               </button>
-                            )}
-                          </div>
-                        ) : isAssignedToMe ? (
-                          markingOpen ? (
-                            <button 
-                              onClick={() => handleMarkClick(slot.period, slot.subjectAcronym)}
-                              className="btn-primary" 
-                              style={{ padding: '10px 20px', fontSize: '13px' }}
-                            >
-                              Mark Attendance
+                            </>
+                          ) : isAssignedToMe && statusInfo.markingOpen ? (
+                            <button className="btn btn-primary" onClick={() => handleMarkClick(slot.period, slot.subjectAcronym)}>
+                              <Play size={12} />
+                              <span>Log Hours</span>
                             </button>
                           ) : (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '13px' }}>
-                              <Lock size={14} />
-                              <span>Closed / Locked</span>
+                            <div className="flex items-center gap-1 text-muted text-xs">
+                              <Lock size={12} />
+                              <span>{statusLabel}</span>
                             </div>
-                          )
-                        ) : (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted)', fontSize: '13px' }}>
-                            <Lock size={14} />
-                            <span>View Only</span>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Side Alerts Feed Panel */}
+          <div className="flex flex-col gap-4">
+            <div className="card animate-fade-in" style={{ borderRadius: '16px' }}>
+              <div className="card-header flex items-center gap-2">
+                <Bell size={16} className="text-primary" />
+                <h3 className="text-sm font-bold">Attendance Alerts</h3>
+              </div>
+              <div className="card-body flex flex-col gap-3" style={{ padding: '16px' }}>
+                {alerts.map((alert) => (
+                  <div 
+                    key={alert.id}
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      background: alert.type === 'warning' ? '#fff1f2' : '#f0f9ff',
+                      border: alert.type === 'warning' ? '1px solid #ffe4e6' : '1px solid #e0f2fe',
+                      fontSize: '11px',
+                      color: alert.type === 'warning' ? '#be123c' : '#0369a1',
+                      display: 'flex',
+                      gap: '8px',
+                      alignItems: 'flex-start'
+                    }}
+                  >
+                    <AlertTriangle size={14} style={{ marginTop: '2px', flexShrink: 0 }} />
+                    <span>{alert.msg}</span>
+                  </div>
+                ))}
               </div>
             </div>
-          )}
-        </div>
+          </div>
 
+        </div>
       </div>
     </div>
   );

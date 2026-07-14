@@ -101,7 +101,7 @@ const teachersData = [
 ];
 
 const studentsData = [
-  { registerNumber: '2023IT001', name: 'Abishek A', department: 'IT', year: 4, section: 'A' },
+  { registerNumber: '2023IT001', name: 'Abishek A', department: 'IT', year: 4, section: 'A', email: 'abishek@college.edu', password: 'student123' },
   { registerNumber: '2023IT002', name: 'Balaji S', department: 'IT', year: 4, section: 'A' },
   { registerNumber: '2023IT003', name: 'Chitra R', department: 'IT', year: 4, section: 'A' },
   { registerNumber: '2023IT004', name: 'Deepak K', department: 'IT', year: 4, section: 'A' },
@@ -295,7 +295,8 @@ const seedDatabase = async () => {
     console.log('Seeded Teachers.');
 
     // Seed Students
-    await Student.insertMany(studentsData);
+    // Need to trigger password hashing pre-save, so we use Student.create
+    await Student.create(studentsData);
     console.log('Seeded Students.');
 
     // Map subjectName inside Timetable objects

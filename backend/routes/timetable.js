@@ -65,9 +65,8 @@ router.get('/my-schedule/:dayNumber', protect, async (req, res) => {
   }
 
   try {
-    // If admin, they can view all periods or manage the dashboard
-    const isAdmin = req.user.role === 'admin';
-    const query = isAdmin ? { dayNumber } : { dayNumber, teacherId };
+    // Allow teachers to view all scheduled slots for the day so they can monitor and substitute multiple classes
+    const query = { dayNumber };
     
     const slots = await Timetable.find(query).sort({ periodNumber: 1 });
 

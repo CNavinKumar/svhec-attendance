@@ -52,9 +52,30 @@ const isGracePeriodOpen = (period, req) => {
 // @desc    Get student list for attendance
 // @route   GET /api/attendance/students
 // @access  Private
+// Query params: ?department=IT&year=4&section=A (optional - if not provided, inferred from timetable)
 router.get('/students', protect, async (req, res) => {
   try {
-    const students = await Student.find({ department: 'IT' }).sort({ registerNumber: 1 });
+    let { department, year, section } = req.query;
+
+    // If params not provided, try to infer from teacher's timetable assignment
+    if (!department || !year || !section) {
+      if (req.user.role === 'admin') {
+        // Admin sees all students
+        const students = await Student.find({}).sort({ registerNumber: 1 });
+        return res.json(students);
+      }
+      // Since the prototype database contains only IT students, default to 'IT' department to allow all faculty to mark this class
+      department = 'IT';
+      year = 4;
+      section = 'A';
+    }
+
+    const students = await Student.find({
+      department,
+      year: Number(year),
+      section
+    }).sort({ registerNumber: 1 });
+
     res.json(students);
   } catch (error) {
     res.status(500).json({ message: 'Server error: ' + error.message });
@@ -73,7 +94,7 @@ router.get('/status', protect, async (req, res) => {
 
   try {
     const records = await Attendance.find({ date, period: Number(period) })
-      .populate('studentRegisterNumber', 'name registerNumber');
+      .populate('studentRegisterNumber', 'name registerNumber department year section');
 
     if (records.length === 0) {
       // Check if current user is assigned to this timetable day & period
@@ -98,6 +119,7 @@ router.get('/status', protect, async (req, res) => {
     const presentCount = records.filter(r => r.status === 'Present').length;
     const absentCount = records.filter(r => r.status === 'Absent').length;
     const odCount = records.filter(r => r.status === 'OD').length;
+    const lateCount = records.filter(r => r.status === 'Late').length;
 
     // Check if editing is allowed (grace period or admin override)
     const graceOpen = isGracePeriodOpen(Number(period), req);
@@ -111,6 +133,9 @@ router.get('/status', protect, async (req, res) => {
       records: records.map(r => ({
         studentRegisterNumber: r.studentRegisterNumber?.registerNumber || r.studentRegisterNumber,
         name: r.studentRegisterNumber?.name || '',
+        department: r.studentRegisterNumber?.department || '',
+        year: r.studentRegisterNumber?.year || '',
+        section: r.studentRegisterNumber?.section || '',
         status: r.status,
         correctionAllowed: r.correctionAllowed
       })),
@@ -118,7 +143,8 @@ router.get('/status', protect, async (req, res) => {
         total: records.length,
         present: presentCount,
         absent: absentCount,
-        od: odCount
+        od: odCount,
+        late: lateCount
       },
       isAllowedToEdit,
       graceOpen,
@@ -182,6 +208,9 @@ router.post('/submit', protect, async (req, res) => {
 
     await Attendance.insertMany(attendanceEntries);
 
+    // Emit live update signal
+    req.app.get('io')?.emit('attendance_updated', { date, period, timetableDay, subject });
+
     res.status(201).json({ message: 'Attendance submitted successfully.' });
   } catch (error) {
     res.status(500).json({ message: 'Server error: ' + error.message });
@@ -234,6 +263,9 @@ router.put('/edit', protect, async (req, res) => {
         }
       );
     }
+
+    // Emit live update signal
+    req.app.get('io')?.emit('attendance_updated', { date, period });
 
     res.json({ message: 'Attendance updated successfully.' });
   } catch (error) {
